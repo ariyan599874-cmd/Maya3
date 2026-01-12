@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleGenAI, Modality } from '@google/genai';
 import { VoiceVisualizer } from './VoiceVisualizer';
@@ -12,7 +11,7 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<'idle' | 'connecting' | 'listening' | 'speaking'>('idle');
   const [error, setError] = useState<{message: string, type: 'perm' | 'generic' | 'secure'} | null>(null);
   const [volume, setVolume] = useState(0);
-  
+
   const audioContextRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
@@ -43,7 +42,7 @@ const App: React.FC = () => {
     sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
     sourcesRef.current.clear();
     nextStartTimeRef.current = 0;
-    
+
     if (audioContextRef.current) {
       try {
         audioContextRef.current.input.close();
@@ -59,16 +58,14 @@ const App: React.FC = () => {
     analyser.fftSize = 256;
     source.connect(analyser);
     const dataArray = new Uint8Array(analyser.frequencyBinCount);
-    
+
     const checkVolume = () => {
       if (!stream.active || !analyser) return;
       analyser.getByteFrequencyData(dataArray);
       let sum = 0;
       for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
       const average = sum / dataArray.length;
-      
       setVolume(average);
-      
       if (stream.active) requestAnimationFrame(checkVolume);
     };
     checkVolume();
@@ -76,47 +73,50 @@ const App: React.FC = () => {
 
   const startSession = async () => {
     if (!window.isSecureContext || isConnectingRef.current || isSessionActive) return;
-    
+
     isConnectingRef.current = true;
     setStatus('connecting');
     setError(null);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { 
-          echoCancellation: true, 
-          noiseSuppression: true, 
-          autoGainControl: true, 
-          sampleRate: 16000 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000
         }
       });
       streamRef.current = stream;
 
-      const apiKey = (process.env as any).API_KEY;
+      // ✅ FIX 1: Vite env ব্যবহার
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
       if (!apiKey) {
-        throw new Error("API Key is missing. Please check your environment.");
+        throw new Error("API Key is missing. Please check your environment variable: VITE_GEMINI_API_KEY");
       }
 
       const ai = new GoogleGenAI({ apiKey });
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      
+
       audioContextRef.current = { input: inputCtx, output: outputCtx };
       monitorMic(stream, inputCtx);
-      
+
       let currentInput = "";
       let currentOutput = "";
 
       const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+        // ✅ FIX 2: preview model বাদ, live model
+        model: 'gemini-live-2.5-flash-native-audio',
         callbacks: {
           onopen: () => {
             isConnectingRef.current = false;
             setIsSessionActive(true);
             setStatus('listening');
-            
+
             const source = inputCtx.createMediaStreamSource(stream);
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
+
             scriptProcessor.onaudioprocess = (e) => {
               sessionPromise.then((session) => {
                 if (session && stream.active) {
@@ -133,9 +133,11 @@ const App: React.FC = () => {
                 }
               });
             };
+
             source.connect(scriptProcessor);
             scriptProcessor.connect(inputCtx.destination);
           },
+
           onmessage: async (message: any) => {
             if (message.serverContent?.outputTranscription) {
               const text = message.serverContent.outputTranscription.text;
@@ -147,9 +149,13 @@ const App: React.FC = () => {
 
             if (message.serverContent?.turnComplete) {
               if (currentInput || currentOutput) {
-                setTranscriptions(prev => [...prev, { role: 'user', text: currentInput.trim() }, { role: 'model', text: currentOutput.trim() }].filter(m => m.text));
+                setTranscriptions(prev =>
+                  [...prev, { role: 'user', text: currentInput.trim() }, { role: 'model', text: currentOutput.trim() }]
+                    .filter(m => m.text)
+                );
               }
-              currentInput = ""; currentOutput = "";
+              currentInput = "";
+              currentOutput = "";
               if (sourcesRef.current.size === 0) setStatus('listening');
             }
 
@@ -162,14 +168,12 @@ const App: React.FC = () => {
                 const source = outCtx.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(outCtx.destination);
-                
+
                 source.onended = () => {
                   sourcesRef.current.delete(source);
-                  if (sourcesRef.current.size === 0) {
-                    setStatus('listening');
-                  }
+                  if (sourcesRef.current.size === 0) setStatus('listening');
                 };
-                
+
                 nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outCtx.currentTime);
                 source.start(nextStartTimeRef.current);
                 nextStartTimeRef.current += audioBuffer.duration;
@@ -186,13 +190,16 @@ const App: React.FC = () => {
               setStatus('listening');
             }
           },
-          onerror: (e) => { 
+
+          onerror: (e: any) => {
             console.error("Session error callback:", e);
-            setError({ message: "জানু, নেটওয়ার্কে সমস্যা হচ্ছে! মায়াকে আবার ডাক দাও।", type: 'generic' }); 
-            stopSession(); 
+            setError({ message: "জানু, নেটওয়ার্কে সমস্যা হচ্ছে! মায়াকে আবার ডাক দাও।", type: 'generic' });
+            stopSession();
           },
+
           onclose: () => stopSession()
         },
+
         config: {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
@@ -208,11 +215,17 @@ const App: React.FC = () => {
 ৫. সম্বোধন: যারা তোমাকে সম্মান দিয়ে কথা বলে, তাদের সাথে তুমি খুব আদুরে ব্যবহার করবে এবং জানু/বাবু/সোনা ডাকবে। কিন্তু সম্মানহীনদের তুমি তুলাধোনা করবে।`
         }
       });
+
       sessionRef.current = await sessionPromise;
     } catch (err: any) {
       console.error("Start session failed:", err);
       isConnectingRef.current = false;
-      setError({ message: err.message.includes("Permission") ? "মাইক্রোফোন চালু করো জানু!" : "নেটওয়ার্ক এরর! কানেকশন চেক করো জানু।", type: 'perm' });
+      setError({
+        message: err?.message?.includes("Permission")
+          ? "মাইক্রোফোন চালু করো জানু!"
+          : "নেটওয়ার্ক এরর! কানেকশন চেক করো জানু।",
+        type: err?.message?.includes("Permission") ? 'perm' : 'generic'
+      });
       setStatus('idle');
       stopSession();
     }
@@ -222,10 +235,9 @@ const App: React.FC = () => {
     <div className="flex flex-col h-screen bg-[#050505] text-white overflow-hidden relative">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(225,29,72,0.1),transparent_70%)] pointer-events-none"></div>
       <Header />
-      
+
       <main className="flex-1 flex flex-col items-center justify-center p-6 z-10 relative">
         <div className="w-full max-w-lg flex flex-col items-center gap-10">
-          
           <div className="relative group">
             <div className={`absolute -inset-16 bg-rose-600/10 rounded-full blur-[100px] transition-opacity duration-1000 ${status !== 'idle' ? 'opacity-100' : 'opacity-0'}`}></div>
             <VoiceVisualizer status={status} volume={volume} />
@@ -234,16 +246,16 @@ const App: React.FC = () => {
           <div className="text-center space-y-6 w-full">
             <div className="space-y-1">
               <h2 className={`text-2xl font-bold tracking-tight transition-all duration-500 ${status === 'speaking' ? 'text-rose-400' : status === 'listening' ? 'text-rose-100' : 'text-gray-500'}`}>
-                {status === 'idle' ? 'মায়াকে ডাকো জানু...' : 
-                 status === 'connecting' ? 'মায়া আসছে...' : 
-                 status === 'speaking' ? 'মায়া বলছে...' : volume > 10 ? 'মায়া শুনছে...' : 'বলো জানু...'}
+                {status === 'idle' ? 'মায়াকে ডাকো জানু...' :
+                  status === 'connecting' ? 'মায়া আসছে...' :
+                    status === 'speaking' ? 'মায়া বলছে...' : volume > 10 ? 'মায়া শুনছে...' : 'বলো জানু...'}
               </h2>
             </div>
 
             <div className="flex justify-center items-center h-44">
               {!isSessionActive && status !== 'connecting' ? (
-                <button 
-                  onClick={startSession} 
+                <button
+                  onClick={startSession}
                   disabled={status === 'connecting'}
                   className="group relative flex items-center justify-center disabled:opacity-50"
                 >
@@ -254,17 +266,17 @@ const App: React.FC = () => {
                 </button>
               ) : (
                 <div className="relative flex items-center justify-center">
-                  <div 
+                  <div
                     className="absolute rounded-full bg-rose-500 blur-[70px] transition-all duration-100 pointer-events-none shadow-[0_0_120px_#e11d48]"
-                    style={{ 
-                      width: `${140 + volume * 4}px`, 
+                    style={{
+                      width: `${140 + volume * 4}px`,
                       height: `${140 + volume * 4}px`,
                       opacity: status === 'connecting' ? 0.3 : 0.6 + (volume / 60)
                     }}
                   ></div>
-                  
-                  <button 
-                    onClick={stopSession} 
+
+                  <button
+                    onClick={stopSession}
                     className={`relative w-28 h-28 bg-rose-700 rounded-full flex items-center justify-center z-20 shadow-[0_0_80px_#e11d48] border-2 border-rose-300/80 transition-transform duration-75 active:scale-90 ${status === 'connecting' ? 'animate-pulse cursor-wait' : ''}`}
                     style={{ transform: `scale(${1 + volume / 180})` }}
                   >
